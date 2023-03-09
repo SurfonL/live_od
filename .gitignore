@@ -1,3 +1,10 @@
 photos
 models/*
 __pycache__
+logs/*
+IMPORTANT
+IMPORTANT1
+*.mp4
+GT
+*.jpg
+*.pth

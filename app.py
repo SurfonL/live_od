@@ -5,7 +5,7 @@ import threading
 import urllib.request
 from pathlib import Path
 from typing import List, NamedTuple, Optional
-
+import argparse
 import av
 import cv2
 import matplotlib.pyplot as plt
@@ -19,18 +19,21 @@ import torchvision.transforms.functional as F
 from aiortc.contrib.media import MediaPlayer
 from streamlit_webrtc import (RTCConfiguration, WebRtcMode,
                               WebRtcStreamerContext, webrtc_streamer)
-from torchvision.models.detection import (FasterRCNN_ResNet50_FPN_V2_Weights,
-                                          fasterrcnn_resnet50_fpn_v2)
 
+import time
 from torchvision.utils import draw_bounding_boxes
 from pathlib import Path
-
-from yolov3 import load_model
+import copy
+from mmdet.core.post_processing import bbox_nms
 from PIL import Image
 import datetime
 import pickle
 import os
 import glob
+import time
+
+from nvdiffrec.atk.utils_initiate import initiate_model, Label2Word
+
 
 # from session import SessionState
 
@@ -90,6 +93,7 @@ RTC_CONFIGURATION = RTCConfiguration(
 )
 
 
+
 def main():
     st.header("RaS: Reconstruct-and-Shoot ")
 
@@ -124,147 +128,128 @@ def main():
             logger.debug(f"  {thread.name} ({thread.ident})")
 
 
-
-
-
-
-
-
-@st.cache
-def init_run():
-
-    yolo = load_model('models/model_confs/yolov3.conf',
-                                'models/state_dicts/yolov3.weights').eval().cuda()
-
-    weights = FasterRCNN_ResNet50_FPN_V2_Weights.DEFAULT
-
-
-    frcnn = fasterrcnn_resnet50_fpn_v2(weights=weights, box_score_thresh=0.75, rpn_post_nms_top_n_test=512, download_file=True).eval().cuda()
-    
-    return  frcnn, weights,yolo
-
-
-
-
+# @st.cache
+def init_run(args):
+    model = initiate_model(args)
+    # if args.model_name == 'crcnn' or 'yolof':
+    #     model.to('cuda:1')
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Resize(args.cfg['img_scale']),
+        T.Normalize(args.cfg['img_norm_cfg']['mean'], args.cfg['img_norm_cfg']['std']),
+        
+    ])
+    return  model, transform
 
 global save_, retake_, hor
 save_ = threading.Event()
 retake_ = threading.Event()
 # saved_ = threading.Event()
+lock = threading.Lock()
+detection_container = {'imgs':None, 'boxes':0, 'det_results':0}
+
+
+class SaveData:
+    def __init__(self) -> None:
+        self.to_be_saved = {'imgs':[i for i in range(12)], 'boxed':[i for i in range(12)], 'det_results': [i for i in range(12)]}
+        self.do_set_idx = False
+        self.curr_idx =0
+        self.disp='curr_idx: {}'.format(self.curr_idx)
+    
+    def display(self):
+        return self.disp
+    
+    def insert_img_data(self,container,n):
+        if n < 12:
+            for key, value in self.to_be_saved.items():
+                self.to_be_saved[key][n] =container[key]
+            self.disp ='curr_idx: {}'.format(self.curr_idx)
+            self.curr_idx = n+1
+            
+        if self.curr_idx >= 12:
+            self.curr_idx=11
+            self.disp ='maxed out curr_idx: {}'.format(self.curr_idx)
+        else:
+            self.disp ='curr_idx: {}'.format(self.curr_idx)
+        return self.curr_idx
+    
+    def get_curr_idx(self):
+        return self.curr_idx
+    
+    def reset(self):
+        self.to_be_saved = {'imgs':[i for i in range(12)], 'boxed':[i for i in range(12)], 'det_results': [i for i in range(12)]}
+        self.curr_idx =0
+        self.disp ='curr_idx: {}'.format(self.curr_idx)
+    def save(self, directory):
+        right = True
+        for i in self.to_be_saved['imgs']:
+            t = type(i)
+            if t is int:
+                right = False
+                self.disp = '{}th is not an image, curr_idx: {}'.format(i, self.curr_idx)
+                return
+        if right:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            for key, value in self.to_be_saved.items():
+                if key in ['imgs', 'boxed']:
+                    for i, v in enumerate(value):
+                        Image.fromarray(v).save(directory+'/{}{}.jpg'.format(key,i))
+                        # print(v)
+                elif key in ['det_results']:
+                    with open(directory+'/{}.pkl'.format(key), 'wb') as f:
+                        pickle.dump(self.to_be_saved['det_results'], f)
+
+            self.reset()
+            self.disp = 'Images Saved! curr_idx: {}'.format(self.curr_idx)    
+    def set_idx(self,idx):
+        self.curr_idx = idx
+        self.disp ='curr_idx: {}'.format(self.curr_idx)
+# Datacontainer = SaveData()
 
 
 
-
+    
+label_names = Label2Word('frcnn')
 def app_object_detection():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_name', type=str, default='frcnn', help='model to attack')
+    args = parser.parse_args()
     
-    
-    
-    
-    
-    set_session_state()
-    class LoadImage():
-        def __init__(self) -> None:
-            self.cur_idx = 0
-            self.past_idx = 0
-            self.images = []
-            
-        def load_img(self, txt, d):
-            images = []
-            _dir = os.path.join('photos',txt,d)
-            _dir = _dir.lower()
-            
-            for i in range(12):
-                f = os.path.join(_dir,str(i)+"_.jpg")
-                if os.path.exists(f):
-                    im = np.array(Image.open(f))
-                else:
-                    im = np.random.uniform(low = 0, high=255,size=((512,512,3))).astype(np.uint8)
-                images.append(im)
-            self.images = images
-            
-        def return_img(self,disp_image):
-            global hor
-            if hor >= len(self.images):
-                pass
-            else:
-                h,w,c = disp_image.shape
-                img = Image.fromarray(self.images[hor])
-                img = img.resize((w,h))
-                img = np.array(img)
-                return img
+   
         
-    def _save_data():
-        # st.session_state.hor += 1
-        save_.set()
-        
-    def _retake():
-        retake_.set()    
-        
-    def save_data(box, img, detections):
-        global save_, retake_
-        
-        s = save_.is_set()
-        r = retake_.is_set()
-        
-        if s or r:
-            box = Image.fromarray(box)
-            img = Image.fromarray(img)
-            Path(exp_dir+d).mkdir(parents=True, exist_ok=True)
-            
 
-            n = exp_dir + d+str(hor)
-            box.save(n+'_.jpg')
-            img.save(n+'.jpg')
-            with open(n +'.pkl','wb') as fw:
-                pickle.dump(detections, fw)
-            if os.path.exists(n+'_.jpg'):
-                with open('hor.pkl', 'wb') as p:
-                    pickle.dump(hor,p)
-                    print(hor)
-            
-            
-            save_.clear()
-            retake_.clear()
             
             
     
     
-    frcnn, weights,yolo = init_run()
 
  
     # Session-specific caching   
     cache_key = "object_detection_dnn"
 
-    
-    
-    transforms = T.Compose([
-                            T.ToTensor(),
-                            # T.Resize((512,512)),
-                            ])    
+
 
     col1, col2, col3 = st.columns(3)
     exp_name = col1.text_input("exp_name", "test")
     original_label = col2.text_input("name of the object", "car")
-    model_name = col3.radio("model", ["frcnn", "yolo"])
+    args.model_name = col3.radio("model", ["frcnn", "yolo", "crcnn", "yolof"])
+    
+    model, transforms = init_run(args)
     
     t1, t2, t3, t4= st.columns(4)
-    t4.button("save", on_click = _save_data)
     
     
     
     # exp_dir = "photos/{}.{}.{}.{}-{}_{}_{}".format(now.month,now.day,now.hour,now.minute, exp_name, original_label, model_name)
-    exp_dir = "photos/{}_{}_{}/".format(exp_name, original_label, model_name)
+    exp_dir = "photos/{}_{}_{}/".format(exp_name, original_label, args.model_name)
     exp_dir = exp_dir.lower()
     Path(exp_dir).mkdir(parents=True, exist_ok=True)
     
-    net = yolo if model_name=='yolo' else frcnn
-    compare = LoadImage()
+    net = model
     ra = 0.5
     result_queue = (
         queue.Queue()
     )  # TODO: A general-purpose shared state object may be more useful.
-
-    
     
     font = 'Ubuntu-R.ttf'
     
@@ -275,21 +260,34 @@ def app_object_detection():
     def callback(frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
         image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
-        image = transforms(image).cuda()[None,...]
-
-        with torch.no_grad():
-            detections = net(image)
-
+        h,w,c = image.shape
+        size = min(h, w)
+        image = cv2.getRectSubPix(image, (size, size), (w // 2, h // 2))
+        image_t = transforms(image).cuda()[None,...]
         
-        image = image*255
-        image = image[0].detach().cpu().to(torch.uint8)
-        if model_name == 'yolo':
-            detections[0]['labels'] +=1
-        labels = [str(weights.meta["categories"][i.item()]) for i in detections[0]['labels']]
+        
+        scale_factor = scalef(image,args)
+        imsize = np.array((*image_t.shape[-2:],3))
+        img_metas = {'ori_shape': image.shape,
+                'img_shape': imsize,
+                'pad_shape': imsize,
+                'img_norm_cfg': args.cfg['img_norm_cfg'],
+                'scale_factor': scale_factor,
+                }
+        
+        
+        with torch.no_grad():
+            detections = net.forward_test([image_t],[[img_metas]],rescale=True)
+        detections = process_det_output(detections)
+        # print(detections)
+        
+        image = torch.from_numpy(image).permute(2,0,1)
+        # detections[0]['labels'] +=1
+        labels = [str(label_names.id_to_label(i)) for i in detections[0]['labels']]
 
         
         det = {'labels':[], 'boxes':[], 'scores':[]}
-        if not original_label == "any":
+        if not original_label == "":
             try:
                 obj_idx = labels.index(original_label)
                 l = ['{} {}'.format(labels[obj_idx], int(round(detections[0]["scores"][obj_idx].item(),2)*100))]
@@ -308,26 +306,17 @@ def app_object_detection():
         color = (255,0,0) if original_label in labels else (0,255,0)
         
         font_size = int(w/20)
-        box = draw_bounding_boxes(image, b ,l, colors = color,font=font, font_size=font_size, width=4).permute(1,2,0).detach().cpu().numpy()
+        box = draw_bounding_boxes(image, b ,l, colors = color,font=font, font_size=font_size, width=4).permute(1,2,0)
         
-        save_data(box,image.permute(1,2,0).numpy(),det)
+        with lock:
+            detection_container['imgs'] = image.permute(1,2,0).numpy()
+            detection_container['boxed'] = box.detach().clone().cpu().numpy()
+            detection_container['det_results'] = detections
+            
 
-        
-        # NOTE: This `recv` method is called in another thread,
-        # so it must be thread-safe.
-        result_queue.put(detections[0])  # TODO:
-        disp_image = box
-        
-        try:
-            if txt != "none":
-                l_img = compare.return_img(disp_image)
-                if isinstance(l_img, np.ndarray):
-                    disp_image = disp_image*ra + l_img*(1-ra)
-        except:
-            pass
+        disp_image = box.cpu().numpy()
         
         h_c, w_c = int(h/2), int(w/2)
-        
         disp_image[h_c-5:h_c+5, w_c-5:w_c+5,1] = 255
         disp_image[h_c-5:h_c+5, w_c-5:w_c+5,0] = 0
         disp_image[h_c-5:h_c+5, w_c-5:w_c+5,2] = 0
@@ -335,6 +324,8 @@ def app_object_detection():
         disp_image = disp_image.astype(np.uint8)       
         disp_image = cv2.cvtColor(disp_image,cv2.COLOR_RGB2BGR)
         return av.VideoFrame.from_ndarray(disp_image, format="bgr24")
+    
+    stop = st.checkbox("Stop")
 
     webrtc_ctx = webrtc_streamer(
         key="object-detection",
@@ -342,50 +333,58 @@ def app_object_detection():
         rtc_configuration=RTC_CONFIGURATION,
         video_frame_callback=callback,
         media_stream_constraints={"video": {
-            "width": 1024, "height": 1024, "framerate": {"max":2}}, 
-                                  "audio": False,
-                                  },
+            "width": 1024, "height": 1024, "framerate": {"max":1}}, 
+                                "audio": False,
+                                },
         async_processing=True,
     )
     
+    Datacontainer = SaveData()
+    if 'container' not in st.session_state:
+        st.session_state['container'] = 0
+    if 'datacontainer' not in st.session_state:
+        st.session_state['datacontainer'] = SaveData()
+    else:
+        Datacontainer = st.session_state['datacontainer']
+            
+    def _insert():
+        idx = Datacontainer.get_curr_idx()
+        Datacontainer.insert_img_data(st.session_state['container'],idx)
+    def _save():
+        Datacontainer.save(exp_dir+d)
+    def _set_curr_idx():
+        Datacontainer.do_set_idx = True
     
-    pr = pickle.load(open('hor.pkl', 'rb'))
-    t3.write('last saved: '+ str(pr))
-    
-    pr = 0 if pr == 11 else pr+1
-    global hor
-    hor = t2.number_input("horizontal start from", min_value = 0, max_value = 11, value = pr)
-    t1.write("horizontal idx: {}".format(hor))
     
     
     
-
+    
+    d = st.select_slider('what experiment',['0base', '1high', '2far', '3orange', '4shadow'], on_change=Datacontainer.reset)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.button('append data', on_click=_insert, key='appenddataaaa')
+    img_idx = col2.slider('img index',min_value=0,max_value=11, value=0, on_change=_set_curr_idx)
+    if Datacontainer.do_set_idx:
+        Datacontainer.set_idx(img_idx)
+        Datacontainer.do_set_idx=False
+    print(Datacontainer.display())
+    col3.write(Datacontainer.disp)
+    col4.button('save data', on_click=_save)
+    # col5.button('reset', on_click=)
+    
+    
+    # with lock:
+    #     print(Datacontainer.curr_idx, Datacontainer.to_be_saved, container)
     
   
+    running = False
+    while webrtc_ctx.state.playing:
+        with lock:
+            if detection_container['imgs'] is not None:
+                st.session_state['container'] = detection_container
+                break
+        time.sleep(0.05)
+        
     
-
-    
-    
-    col1, col2, col3 = st.columns(3)
-    vertical = col1.radio("vertical", ["low", "high"], index = 0)
-    distance = col2.radio("distance", ["close", "far"], index = 0)
-    light = col3.radio("light",["white", "orange"], index = 0)
-    col1, col2 = st.columns(2)
-    txt = col1.text_input("load exp name", "none")
-    ra = col2.slider('compare ratio', min_value=0.0, max_value=1.0, value=0.5)
-    
-    d = "{}-{}-{}/".format(vertical,distance,light)
-    Path(exp_dir+d).mkdir(parents=True, exist_ok=True)
-
-   
-    try: 
-        if txt != 'none':
-            txt = txt.lower()
-            compare = LoadImage()
-            compare.load_img(txt,d)
-    except NameError:
-        txt = 'none'
-
     
     # with lock:
     #     img = img_container["img"]
@@ -395,7 +394,8 @@ def app_object_detection():
     # if save_ and img != None:
     #     print('save', save_)
     #     save_data(box,img,det)
-    
+
+
             
     
     
@@ -407,10 +407,48 @@ def set_session_state():
     if 'retake' not in st.session_state:
         st.session_state.retake = False
 
-        
-
+def process_det_output(output):
+    #'output:List[List(80)[Tensor(n,5)]]'
+    # only batch size 1
     
+    bbox_result = output[0]
+    if len(bbox_result) < 80:
+        bbox_result=bbox_result[0]
+    labels = [
+            np.full(bbox.shape[0], i, dtype=np.int32)
+            for i, bbox in enumerate(bbox_result)
+        ]
+    labels = np.concatenate(labels)
+    bboxes = np.vstack(bbox_result)    
+    scores = bboxes[...,-1]
+    bboxes = bboxes[...,:-1]
+    idx = scores>0.5
+    
+    all_preds = {'boxes': bboxes, 'labels': labels, 'scores': scores}
 
+    bboxes = torch.tensor(bboxes[idx, :])
+    labels = torch.tensor(labels[idx])
+    scores = torch.tensor(scores[idx])
+
+    return [{'boxes': bboxes, 'labels': labels, 'scores': scores, 'all_preds':all_preds}]
+        
+def scalef(ori_image, args):
+    X = args.cfg['img_scale'][0]
+    h,w,c = ori_image.shape[-3:]
+    # Compute the new size of the image while maintaining its aspect ratio
+    aspect_ratio = w / h
+    new_h = int(X / aspect_ratio)
+    new_w = int(X * aspect_ratio)
+    size = (new_w, new_h)
+
+    # Resize the image using PyTorch's resize function and compute the scale factor
+    
+    
+    scale_factor = np.array([new_w / w, new_h / h, new_w / w, new_h / h], dtype=np.float32)
+    
+    # scale_factor = torch.tensor([new_w / w, new_h / h, new_w / w, new_h / h])
+    # scale_factor = scale_factor.cuda() if args.model_name == 'frcnn' else scale_factor
+    return scale_factor
 
 
 if __name__ == "__main__":
