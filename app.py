@@ -19,7 +19,7 @@ import torchvision.transforms.functional as F
 from aiortc.contrib.media import MediaPlayer
 from streamlit_webrtc import (RTCConfiguration, WebRtcMode,
                               WebRtcStreamerContext, webrtc_streamer)
-
+from aiortc.contrib.media import MediaRecorder
 import time
 from torchvision.utils import draw_bounding_boxes
 from pathlib import Path
@@ -258,7 +258,9 @@ def app_object_detection():
     
     # img_container = {"img": None, 'box':None, 'detection':None}
     def callback(frame: av.VideoFrame) -> av.VideoFrame:
+        
         image = frame.to_ndarray(format="bgr24")
+        # print(image.shape)
         image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
         h,w,c = image.shape
         size = min(h, w)
@@ -317,16 +319,31 @@ def app_object_detection():
         disp_image = box.cpu().numpy()
         
         h_c, w_c = int(h/2), int(w/2)
-        disp_image[h_c-5:h_c+5, w_c-5:w_c+5,1] = 255
-        disp_image[h_c-5:h_c+5, w_c-5:w_c+5,0] = 0
-        disp_image[h_c-5:h_c+5, w_c-5:w_c+5,2] = 0
+        # disp_image[h_c-5:h_c+5, w_c-5:w_c+5,1] = 255
+        # disp_image[h_c-5:h_c+5, w_c-5:w_c+5,0] = 0
+        # disp_image[h_c-5:h_c+5, w_c-5:w_c+5,2] = 0
         
         disp_image = disp_image.astype(np.uint8)       
         disp_image = cv2.cvtColor(disp_image,cv2.COLOR_RGB2BGR)
+        # print(disp_image.shape)
         return av.VideoFrame.from_ndarray(disp_image, format="bgr24")
-    
-    stop = st.checkbox("Stop")
 
+    def in_recorder_factory() -> MediaRecorder:
+        return MediaRecorder(
+            str(exp_dir+'vid.mp4'), format="flv"
+        )  # HLS does not work. See https://github.com/aiortc/aiortc/issues/331
+
+    def out_recorder_factory() -> MediaRecorder:
+        recorder = MediaRecorder(str(exp_dir+'vid1.flv'), format='flv')
+        # recorder.con
+        # recorder.start()
+        # recorder.stream.width = 1024
+        # recorder.stream.height = 1024
+        return recorder
+
+    
+    
+    
     webrtc_ctx = webrtc_streamer(
         key="object-detection",
         mode=WebRtcMode.SENDRECV,
@@ -337,11 +354,14 @@ def app_object_detection():
                                 "audio": False,
                                 },
         async_processing=True,
+        # in_recorder_factory=in_recorder_factory,
+        out_recorder_factory=out_recorder_factory
     )
     
     Datacontainer = SaveData()
     if 'container' not in st.session_state:
         st.session_state['container'] = 0
+
     if 'datacontainer' not in st.session_state:
         st.session_state['datacontainer'] = SaveData()
     else:
@@ -369,21 +389,18 @@ def app_object_detection():
     print(Datacontainer.display())
     col3.write(Datacontainer.disp)
     col4.button('save data', on_click=_save)
-    # col5.button('reset', on_click=)
-    
-    
-    # with lock:
-    #     print(Datacontainer.curr_idx, Datacontainer.to_be_saved, container)
-    
+
+
   
     running = False
     while webrtc_ctx.state.playing:
         with lock:
             if detection_container['imgs'] is not None:
                 st.session_state['container'] = detection_container
+                
                 break
         time.sleep(0.05)
-        
+
     
     
     # with lock:

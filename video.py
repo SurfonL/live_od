@@ -52,8 +52,24 @@ def process_det_output(output):
     scores = torch.tensor(scores[idx])
     return [{'boxes': bboxes, 'labels': labels, 'scores': scores, 'all_preds':all_preds}]
 
-cap = cv2.VideoCapture('KakaoTalk_20230308_193422603.mp4')
+cap = cv2.VideoCapture('testimgs/KakaoTalk_20230308_193352849.mp4')
 count=0
+
+
+args = Argument(0)
+args.model_name = 'yolof'
+model = initiate_model(args)
+        # if args.model_name == 'crcnn' or 'yolof':
+    #     model.to('cuda:1')
+transform = T.Compose([
+    T.ToTensor(),
+    T.Resize(args.cfg['img_scale']),
+    T.Normalize(args.cfg['img_norm_cfg']['mean'], args.cfg['img_norm_cfg']['std']),
+])
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('output.mp4', fourcc, 30, (1080, 1080))
+if out is None:
+    print('Failed to create video writer')
 # Loop over the frames of the video
 while cap.isOpened():
     
@@ -66,17 +82,10 @@ while cap.isOpened():
 
     font = 'Ubuntu-R.ttf'
 
-    args = Argument(0)
-    args.model_name = 'yolof'
+    if not ret:             #ret이 False면 중지
+        break
 
-    model = initiate_model(args)
-        # if args.model_name == 'crcnn' or 'yolof':
-        #     model.to('cuda:1')
-    transform = T.Compose([
-        T.ToTensor(),
-        T.Resize(args.cfg['img_scale']),
-        T.Normalize(args.cfg['img_norm_cfg']['mean'], args.cfg['img_norm_cfg']['std']),
-    ])
+    
 
     net = model
     # img = cv2.imread("testimgs/KakaoTalk_20230308_193201093.jpg")
@@ -133,6 +142,9 @@ while cap.isOpened():
     
     box = box.cpu().numpy()
     box = cv2.cvtColor(box,cv2.COLOR_RGB2BGR)
+    
+    out.write(box)
+    # print(box.shape, box)
     cv2.imshow('Frame', box)
 
     # Wait for a key press
@@ -143,4 +155,6 @@ while cap.isOpened():
 
     # plt.show()
 cap.release()
+out.release()
 cv2.destroyAllWindows()
+print('released')
